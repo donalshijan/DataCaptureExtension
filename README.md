@@ -1,0 +1,2 @@
+# Overview
+This is a chrome extension for collecting browser UI interaction data, allowing a user to collect the data pertaining to his/her own interactions with the browser UI when attempting to perform a task. The goal of such an extension is to have enriched and learnable DOM interaction data to either fine tune an existing AI model/prepare few shot examples for it or train a custom model, to perform certain tasks in order to build agentic software around it.
