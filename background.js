@@ -66,9 +66,10 @@ function setStorage(obj, callback = null) {
   
     await setStorage({ activeCaptureTabs: [] });
   }
+  
 // remove stale leftover states from previous session
   chrome.runtime.onInstalled.addListener(() => {
-    chrome.storage.local.remove(["isCapturing", "capturePhase"]);
+    chrome.storage.local.remove(["isCapturing", "capturePhase","previousActiveTabId","currentActiveTabId"]);
   });
 // Re-apply capture on tab switch, only if active
 // chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -84,12 +85,39 @@ function setStorage(obj, callback = null) {
 //   });
   
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    const newTabId = activeInfo.tabId;
+    
     const { isCapturing, capturePhase } = await chrome.storage.local.get(["isCapturing", "capturePhase"]);
+
+    // 🔥 Immediately snapshot the old tab ID
+    // 🔁 Update the current one before any async work
+    const { currentActiveTabId = null} = await chrome.storage.local.get(["currentActiveTabId"]);
+    let previousActiveTabId = null;
+    if(isCapturing) {
+       previousActiveTabId = currentActiveTabId;
+    }
+
+    await chrome.storage.local.set({
+      previousActiveTabId,
+      currentActiveTabId: newTabId
+    });
+
+
     if (isCapturing && capturePhase) {
       chrome.scripting.executeScript({
         target: { tabId: activeInfo.tabId },
-        files: ["content.js","toast.js"] // Inject the content script first
+        files: ["content.js","toast.js","db.js"] // Inject the content script first
       }, () => {
+        if (previousActiveTabId !== null && previousActiveTabId !== newTabId){
+
+          // this way you send messsage to content.js to invoke push capture for you
+          chrome.tabs.sendMessage(previousActiveTabId, {
+            action: "PUSH_PENDING_CAPTURE_BEFORE_TAB_SWITCH"
+          }).catch((err) => {
+            console.warn(`Failed to send PUSH_PENDING_CAPTURE to tab ${previousActiveTabId}:`, err);
+          });
+        }
+
         chrome.scripting.executeScript({
           target: { tabId: activeInfo.tabId },
           func: (selectedPhase) => window.startCapture?.(selectedPhase),

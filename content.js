@@ -1,3 +1,17 @@
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === "PUSH_PENDING_CAPTURE_BEFORE_TAB_SWITCH") {
+    if (
+      window.__DataCaptureExtensionGlobals__ &&
+      window.__DataCaptureExtensionGlobals__.rawActions.length > 0
+    ) {
+      console.log('pushing previous tab pending capture');
+      pushCurrentPageCapture();
+    }
+  }
+});
+
+
 //injection guard
 // Immediately Invoked + Exposable Global Re-initializer
 window.reInitLocalGlobals = (function () {
@@ -25,6 +39,16 @@ window.reInitLocalGlobals = (function () {
     console.log("🔁 [reInitLocalGlobals] Local globals reinitialized");
   };
 })();
+
+const FLUSH_THRESHOLD_BYTES = 3 * 1024 * 1024; // 3 MB
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000; // optional periodic flush every 5 mins
+
+const DEFAULT_VALUES = {
+  enrichedLearnableDOMDataAndInstructionsForInteraction: [],
+  // Add more keys and their default values here as needed
+};
+
+
 
 function getCurrentTabId() {
   return new Promise((resolve, reject) => {
@@ -204,17 +228,31 @@ window.startCapture = async (phase = "unspecified") => {
 };
 
 window.stopCapture = async () => {
-  const {isCapturing,enrichedLearnableDOMDataAndInstructionsForInteraction} = await getStorage(["isCapturing","enrichedLearnableDOMDataAndInstructionsForInteraction"]);
+  const {isCapturing} = await getStorage(["isCapturing"]);
   if (!isCapturing) return;
 
   document.removeEventListener("click", logClick, true);
   document.removeEventListener("change", logInput, true);
   window.removeEventListener("scroll", window.__DataCaptureExtensionGlobals__.debouncedWindowScrollHandler);
+  
+  // Push before exporting
+  try {
+    await pushCurrentPageCapture(true); // <- Add try-catch INSIDE
+  } catch (err) {
+    console.error("🔥 Error during pushCurrentPageCapture:", err);
+  }
 
-  await pushCurrentPageCapture(); // Push before exporting
-
+  // Fetch all flushed page objects
+  let pagesFromDB = [];
+  try {
+    pagesFromDB = await DB.getDBValue('pages');
+    if (!Array.isArray(pagesFromDB)) pagesFromDB = [];
+  } catch (err) {
+    console.error("❌ Failed to fetch pages from DB:", err);
+    showToast("DB fetch failed", 'error');
+  }
   const blob = new Blob([
-    JSON.stringify({ pages: enrichedLearnableDOMDataAndInstructionsForInteraction }, null, 2)
+    JSON.stringify({ pages: pagesFromDB }, null, 2)
   ], { type: "application/json" });
 
   const url = URL.createObjectURL(blob);
@@ -231,14 +269,29 @@ window.stopCapture = async () => {
   await setStorage({ isCapturing: false, capturePhase: null }, () => {
     console.log("⛔️ isCapturing set to false");
   });
-  
-  removeManualControlButtons();
+
+  try{
+    await DB.clearDB();
+    console.log("✅ DB cleared for the next capture session.");
+    showToast("✅ DB cleared for the next capture session.",'success');
+  }
+  catch(err){
+    console.error('❌ failed to clear: ',err);
+    showToast("DB clean up failed", 'error');
+  }
+
+  // removeManualControlButtons(); // we really don't need this as cleanup controls message will trigger the invocation of this function anyways, as per it's proper intended sequence.
   try {
     chrome.runtime.sendMessage({ action: "CLEANUP_CONTROLS_ON_ALL_TABS" });
   } catch (err) {
     console.warn(`Failed to send cleanup to background:`, err);
   }
-  cleanupCaptureGlobals();
+
+  setTimeout(() => {
+    cleanupCaptureGlobals(); 
+  },1000);
+
+
 };
 
 async function generatePhaseJsonFilesFromReverseMap() {
@@ -349,9 +402,6 @@ async function logInput(e) {
     // Create new key name from the input's name or placeholder
     const keyGuess = inferKeyName(e.target);
     placeholder = `$${keyGuess}`;
-    
-    // old way to Update reverse map
-    // reverseValueToPlaceholder[value] = placeholder;
 
     // new way to update reverse map
     const updatedMap = {
@@ -400,7 +450,7 @@ async function logScroll(e, el = null) {
     el._lastScrollTop = scrollTop;
   }
 
-  await pushCurrentPageCapture();
+  await pushCurrentPageCapture(false);
   console.log("🌀 Scroll logged:", {
     source: isWindowScroll ? "window" : "element",
     uid,
@@ -523,8 +573,15 @@ function extractVisibleInteractablesAndBuildUidMapping() {
   });
 }
 
-async function pushCurrentPageCapture() {
-  if (window.__DataCaptureExtensionGlobals__.currentInteractables.length === 0) return;
+function estimateSize(obj) {
+  return new TextEncoder().encode(JSON.stringify(obj)).length;
+}
+
+async function pushCurrentPageCapture(syncToDB = false) {
+  if (window.__DataCaptureExtensionGlobals__.currentInteractables.length === 0) {
+    console.log("🟡 No interactables found. Skipping page append, continuing cleanup.");
+    return;
+  }
 
   const dedupedFills = {};
   const finalActions = [];
@@ -542,19 +599,9 @@ async function pushCurrentPageCapture() {
   if (finalActions.length === 0) {
     console.log("🟡 Skipping page capture (no actions)");
     showToast("🟡 Skipping page capture (no actions)",'info');
-    return;
+    if (!syncToDB) return;
   }
   
-  // old way to update
-  // const {capturePhase} = await getStorage(["capturePhase"]);
-  // enrichedLearnableDOMDataAndInstructionsForInteraction.push({
-  //   interactables: window.__DataCaptureExtensionGlobals__.currentInteractables,
-  //   phase: capturePhase,
-  //   scrollY: window.scrollY,
-  //   actions: finalActions
-  // });
-
-  // new way to update
   // Step 1: Get the current stored array (or empty if not set)
   let { enrichedLearnableDOMDataAndInstructionsForInteraction = [] , capturePhase } = await getStorage(["enrichedLearnableDOMDataAndInstructionsForInteraction","capturePhase"]);
 
@@ -567,8 +614,15 @@ async function pushCurrentPageCapture() {
   };
   // Step 2: Push the new object
   enrichedLearnableDOMDataAndInstructionsForInteraction.push(newPageData);
+  const estimatedSize = estimateSize(enrichedLearnableDOMDataAndInstructionsForInteraction);
   // Step 3: Save it back to storage
-  await setStorage({ enrichedLearnableDOMDataAndInstructionsForInteraction });
+  if (estimatedSize >= FLUSH_THRESHOLD_BYTES || syncToDB) {
+    console.warn('Buffer exceeded size threshold. Triggering flush to IndexedDB...');
+    await DB.flushToIndexedDB(enrichedLearnableDOMDataAndInstructionsForInteraction);
+    await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+  } else {
+    await setStorage({ enrichedLearnableDOMDataAndInstructionsForInteraction });
+  }
   window.__DataCaptureExtensionGlobals__.rawActions = [];
   window.__DataCaptureExtensionGlobals__.currentInteractables = [];
 }
@@ -585,7 +639,7 @@ function observeNavigationAndSubmissions() {
     if (hasNavigation && isCapturing) {
       clearTimeout(window.__DataCaptureExtensionGlobals__.debounceTimer); // safe even if debounceTimer is null
       window.__DataCaptureExtensionGlobals__.debounceTimer = setTimeout(() => {
-        pushCurrentPageCapture();
+        pushCurrentPageCapture(false);
         extractVisibleInteractablesAndBuildUidMapping();
       }, 500);
     }
@@ -601,7 +655,7 @@ function observeNavigationAndSubmissions() {
   document.addEventListener("submit", async () => {
     const {isCapturing} = await getStorage("isCapturing");
     if (isCapturing) {
-      pushCurrentPageCapture();
+      pushCurrentPageCapture(false);
       setTimeout(() => extractVisibleInteractablesAndBuildUidMapping(), 500);
     }
   }, true);
@@ -763,7 +817,7 @@ async function pauseCaptureForManualInstruction() {
     message: "manual intervention needed",
   });
   
-  pushCurrentPageCapture();
+  pushCurrentPageCapture(false);
 
 }
 
@@ -778,4 +832,35 @@ function removeManualControlButtons() {
   const el = document.getElementById("manual-control-buttons");
   if (el) el.remove();
   window.__DataCaptureExtensionGlobals__.controlsInjected=false;
+  cleanupCaptureGlobals();
+}
+
+async function initFlushScheduler() {
+  setInterval(async () => {
+    const { enrichedLearnableDOMDataAndInstructionsForInteraction = []  } = await getStorage(["enrichedLearnableDOMDataAndInstructionsForInteraction"]);
+
+    if (enrichedLearnableDOMDataAndInstructionsForInteraction && enrichedLearnableDOMDataAndInstructionsForInteraction.length > 0) {
+      const estimatedSize = estimateSize(enrichedLearnableDOMDataAndInstructionsForInteraction);
+      if (estimatedSize > 0) {
+        console.log('[Scheduled Flush] Flushing buffer to IndexedDB...');
+        await DB.flushToIndexedDB(enrichedLearnableDOMDataAndInstructionsForInteraction);
+        await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+      }
+    }
+  }, FLUSH_INTERVAL_MS);
+}
+
+async function clearStorage(key) {
+  if (!(key in DEFAULT_VALUES)) {
+    console.warn(`[clearStorage] No default value defined for key: ${key}`);
+    return;
+  }
+
+  try {
+    const defaultValue = DEFAULT_VALUES[key];
+    await setStorage({ [key]: defaultValue });
+    console.log(`[clearStorage] Reset "${key}" to default value.`);
+  } catch (err) {
+    console.error(`[clearStorage] Failed to reset key "${key}":`, err);
+  }
 }
