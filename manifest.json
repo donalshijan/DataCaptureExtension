@@ -19,7 +19,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["db.js","content.js","toast.js"],
+      "js": ["content.js","toast.js"],
       "run_at": "document_idle"
     }
   ],
@@ -28,7 +28,8 @@
       "resources": [
         "data/applicant_credentials.json",
         "data/applicant_data.json",
-        "data/applicant_preferences.json"
+        "data/applicant_preferences.json",
+        "db.js"
       ],
       "matches": ["<all_urls>"]
     }

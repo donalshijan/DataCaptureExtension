@@ -1,12 +1,12 @@
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
   if (msg.action === "PUSH_PENDING_CAPTURE_BEFORE_TAB_SWITCH") {
     if (
       window.__DataCaptureExtensionGlobals__ &&
       window.__DataCaptureExtensionGlobals__.rawActions.length > 0
     ) {
       console.log('pushing previous tab pending capture');
-      pushCurrentPageCapture();
+      pushCurrentPageCapture(true);
     }
   }
 });
@@ -62,6 +62,28 @@ function getCurrentTabId() {
   });
 }
 
+function flushToDBFromContentScript(entries) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({
+      action: "FLUSH_TO_INDEXED_DB",
+      payload: { newEntries: entries }
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error("Message failed:", chrome.runtime.lastError);
+        return reject(chrome.runtime.lastError);
+      }
+
+      if (response?.success) {
+        console.log(`✅ Flushed ${response.flushedCount} entries to IndexedDB.`);
+        resolve(response.flushedCount);
+      } else {
+        console.error("❌ Failed to flush to IndexedDB:", response?.err);
+        reject(response?.err || new Error("Unknown flush failure"));
+      }
+    });
+  });
+}
+
 async function registerActiveCaptureTab() {
   const { activeCaptureTabs = [] } = await getStorage(["activeCaptureTabs"]);
   const tabId = await getCurrentTabId(); // Implement using chrome.runtime.sendMessage to background
@@ -71,7 +93,6 @@ async function registerActiveCaptureTab() {
 }
 
 function cleanupCaptureGlobals() {
-  // delete window.__DataCaptureExtension;
   delete window.__DataCaptureExtensionGlobals__;
   window.__DataCaptureExtension = false;
 }
@@ -245,12 +266,25 @@ window.stopCapture = async () => {
   // Fetch all flushed page objects
   let pagesFromDB = [];
   try {
-    pagesFromDB = await DB.getDBValue('pages');
+    pagesFromDB = await new Promise ((resolve,reject) => {
+      chrome.runtime.sendMessage({
+        action: "GET_DB_VALUE",
+        key: "pages"
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Message error:", chrome.runtime.lastError.message);
+          return reject(chrome.runtime.lastError);
+        }
+        const pages = response?.data || [];
+        resolve(pages);
+      });
+    });
     if (!Array.isArray(pagesFromDB)) pagesFromDB = [];
   } catch (err) {
     console.error("❌ Failed to fetch pages from DB:", err);
     showToast("DB fetch failed", 'error');
   }
+
   const blob = new Blob([
     JSON.stringify({ pages: pagesFromDB }, null, 2)
   ], { type: "application/json" });
@@ -269,9 +303,22 @@ window.stopCapture = async () => {
   await setStorage({ isCapturing: false, capturePhase: null }, () => {
     console.log("⛔️ isCapturing set to false");
   });
-
+  let clearDBResponseSuccessStatus = null;
   try{
-    await DB.clearDB();
+    clearDBResponseSuccessStatus = await new Promise ((resolve,reject) => {
+      chrome.runtime.sendMessage({
+        action: "CLEAR_DB",
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Message error:", chrome.runtime.lastError.message);
+          return reject(chrome.runtime.lastError);
+        }
+      
+        const status = response?.success || false;
+        resolve(status);
+      });
+    });
+    if(!clearDBResponseSuccessStatus) throw new Error("Clear DB invocation responsed with status failed");
     console.log("✅ DB cleared for the next capture session.");
     showToast("✅ DB cleared for the next capture session.",'success');
   }
@@ -312,7 +359,6 @@ async function generatePhaseJsonFilesFromReverseMap() {
   const { reverseValueToPlaceholder } = await getStorage(["reverseValueToPlaceholder"]);
   for (const [value, placeholders] of Object.entries(reverseValueToPlaceholder)) {
     for (const placeholder of placeholders) {
-      // const match = placeholder.match(/^\$(\w+)$/); // extract field name like $email
       const match = placeholder.match(/^\$(.+)$/); // extract field name like $email and fields with . and numbers like $education.0.institute
       if (!match) continue;
 
@@ -618,8 +664,13 @@ async function pushCurrentPageCapture(syncToDB = false) {
   // Step 3: Save it back to storage
   if (estimatedSize >= FLUSH_THRESHOLD_BYTES || syncToDB) {
     console.warn('Buffer exceeded size threshold. Triggering flush to IndexedDB...');
-    await DB.flushToIndexedDB(enrichedLearnableDOMDataAndInstructionsForInteraction);
-    await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+    await flushToDBFromContentScript(enrichedLearnableDOMDataAndInstructionsForInteraction)
+    .then(async (count) => {
+      console.log(`✅ Flushed ${count} entries`);
+      console.log("succesfuly flush , attempting to clear enrichedLearnableDOMDataAndInstructionsForInteraction");
+      await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+    })
+    .catch((err) => console.error("Flush failed:", err));
   } else {
     await setStorage({ enrichedLearnableDOMDataAndInstructionsForInteraction });
   }
@@ -843,8 +894,13 @@ async function initFlushScheduler() {
       const estimatedSize = estimateSize(enrichedLearnableDOMDataAndInstructionsForInteraction);
       if (estimatedSize > 0) {
         console.log('[Scheduled Flush] Flushing buffer to IndexedDB...');
-        await DB.flushToIndexedDB(enrichedLearnableDOMDataAndInstructionsForInteraction);
-        await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+        await flushToDBFromContentScript(enrichedLearnableDOMDataAndInstructionsForInteraction)
+        .then(async (count) => {
+          console.log(`✅ Flushed ${count} entries`);
+          console.log("succesfuly flush , attempting to clear enrichedLearnableDOMDataAndInstructionsForInteraction");
+          await clearStorage('enrichedLearnableDOMDataAndInstructionsForInteraction');
+        })
+        .catch((err) => console.error("Flush failed:", err));
       }
     }
   }, FLUSH_INTERVAL_MS);

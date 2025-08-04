@@ -1,4 +1,4 @@
-
+importScripts("db.js");
 // Handle start/stop capture commands
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "start-capture") {
@@ -26,6 +26,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     else if (message.action === "CLEANUP_CONTROLS_ON_ALL_TABS") {
       cleanupControlsOnAllTabs(); // defined in the same file
+    }
+    else if (message.action === "FLUSH_TO_INDEXED_DB") {
+      flushToIndexedDB(message.payload.newEntries).then((flushedCount)=>{
+        sendResponse({success: true, flushedCount});
+      }).catch((err)=>{
+        sendResponse({success: false, err});
+      });
+      return true;
+    }
+    else if (message.action === "GET_DB_VALUE") {
+      (async () => {
+        try {
+          const data = await getDBValue(message.key);
+          sendResponse({ data });
+        } catch (err) {
+          console.error("DB error:", err);
+          sendResponse({ data: [] });
+        }
+      })();
+      return true;
+    }
+    else if (message.action === "CLEAR_DB") {
+      clearDB().then(() => {
+        sendResponse({ success: true });
+      }).catch((err)=>{
+        console.error("DB error:", err);
+        sendResponse({ success: false });
+      });
+      return true;
     }
     return true; // Required for async response
   });
@@ -66,23 +95,12 @@ function setStorage(obj, callback = null) {
   
     await setStorage({ activeCaptureTabs: [] });
   }
-  
+
 // remove stale leftover states from previous session
   chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.remove(["isCapturing", "capturePhase","previousActiveTabId","currentActiveTabId"]);
   });
 // Re-apply capture on tab switch, only if active
-// chrome.tabs.onActivated.addListener((activeInfo) => {
-//     chrome.storage.local.get(["isCapturing", "phase"], ({ isCapturing, phase }) => {
-//       if (isCapturing && phase) {
-//         chrome.scripting.executeScript({
-//           target: { tabId: activeInfo.tabId },
-//           func: (selectedPhase) => window.startCapture?.(selectedPhase),
-//           args: [phase]
-//         });
-//       }
-//     });
-//   });
   
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const newTabId = activeInfo.tabId;
@@ -106,7 +124,7 @@ function setStorage(obj, callback = null) {
     if (isCapturing && capturePhase) {
       chrome.scripting.executeScript({
         target: { tabId: activeInfo.tabId },
-        files: ["content.js","toast.js","db.js"] // Inject the content script first
+        files: ["content.js","toast.js"] // Inject the content script first
       }, () => {
         if (previousActiveTabId !== null && previousActiveTabId !== newTabId){
 
@@ -117,7 +135,6 @@ function setStorage(obj, callback = null) {
             console.warn(`Failed to send PUSH_PENDING_CAPTURE to tab ${previousActiveTabId}:`, err);
           });
         }
-
         chrome.scripting.executeScript({
           target: { tabId: activeInfo.tabId },
           func: (selectedPhase) => window.startCapture?.(selectedPhase),

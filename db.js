@@ -1,4 +1,3 @@
-(function () {
 
 let dbInstance = null; // 👈 This is now a private, memoized singleton
 
@@ -25,19 +24,6 @@ async function openDB(dbName = 'DataCaptureDB', storeName = 'Storage') {
     };
     });
 }
-//  async function openDB(dbName = 'DataCaptureDB', storeName = 'Storage') {
-//     return new Promise((resolve, reject) => {
-//       const request = indexedDB.open(dbName, 1);
-//       request.onerror = () => reject(request.error);
-//       request.onsuccess = () => resolve(request.result);
-//       request.onupgradeneeded = () => {
-//         const db = request.result;
-//         if (!db.objectStoreNames.contains(storeName)) {
-//           db.createObjectStore(storeName);
-//         }
-//       };
-//     });
-//   }
 
   async function clearDB(storeName = 'Storage') {
     const db = await openDB();
@@ -219,35 +205,55 @@ async function openDB(dbName = 'DataCaptureDB', storeName = 'Storage') {
   });
 }
 
-  async function flushToIndexedDB(newEntries) {
-    try {
-      // Step 1: Get the buffer (array of entries to append)
-      if (!Array.isArray(newEntries) || newEntries.length === 0) return;
+  // async function flushToIndexedDB(newEntries) {
+  //   console.log('flushInvoked');
+  //   try {
+  //     // Step 1: Get the buffer (array of entries to append)
+  //     if (!Array.isArray(newEntries) || newEntries.length === 0) return;
   
-      // Step 2: Get existing pages array from IndexedDB
-      const existingPages = await getDBValue('pages') || [];
+  //     // Step 2: Get existing pages array from IndexedDB
+  //     const existingPages = await getDBValue('pages') || [];
   
-      // Step 3: Merge the arrays
-      const updatedPages = [...existingPages, ...newEntries];
+  //     // Step 3: Merge the arrays
+  //     const updatedPages = [...existingPages, ...newEntries];
   
-      // Step 4: Write back the updated array under 'pages' key
-      await setDBValue('pages', updatedPages);
+  //     // Step 4: Write back the updated array under 'pages' key
+  //     await setDBValue('pages', updatedPages);
   
-      console.log(`[FLUSH] Flushed ${newEntries.length} new entries to IndexedDB.`);
-    } catch (err) {
-      console.error('[FLUSH ERROR]', err);
+  //     console.log(`[FLUSH] Flushed ${newEntries.length} new entries to IndexedDB.`);
+  //     return { success: true, flushedCount: newEntries.length };
+
+  //   } catch (err) {
+  //     console.error('[FLUSH ERROR]', err);
+  //     return { success: false, error: err.message || 'Unknown error during flush' };
+  //   }
+  // }
+
+  function flushToIndexedDB(newEntries) {
+    if (!Array.isArray(newEntries) || newEntries.length === 0) {
+      return Promise.reject(new Error('No valid entries to flush.'));
     }
+  
+    return new Promise(async (resolve, reject) => {
+      try {
+        const existingPages = await getDBValue('pages') || [];
+        const updatedPages = [...existingPages, ...newEntries];
+  
+        // Use your custom abstraction
+        setDBValue('pages', updatedPages)
+          .then(() => {
+            console.log(`[FLUSH] Flushed ${newEntries.length} entries.`);
+            resolve(newEntries.length); // or resolve({ success: true }) if you want metadata
+          })
+          .catch((err) => {
+            console.error("[FLUSH ERROR] error during setDBValue invocation", err);
+            reject(err);
+          });
+  
+      } catch (err) {
+        console.error("[FLUSH ERROR - outer catch]", err);
+        reject(err);
+      }
+    });
   }
-      // Attach everything under the DB namespace
-    window.DB = {
-        openDB,
-        clearDB,
-        setDBValue,
-        getDBValue,
-        appendToNestedObjectOfKey,
-        appendToArrayFieldOfKey,
-        appendToArrayOfKey,
-        updateNestedField,
-        flushToIndexedDB
-    };
-})();
+  
